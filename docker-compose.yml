@@ -1,0 +1,77 @@
+version: '3.8'
+
+services:
+  # 1. Layanan Database (PostgreSQL) [cite: 39]
+  db:
+    image: postgres:14-alpine
+    container_name: db
+    restart: always
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: fullstack_challenge
+    ports:
+      - '5432:5432' # Hanya untuk debugging lokal
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # 2. Layanan Caching (Redis) [cite: 38]
+  cache:
+    image: redis:7-alpine
+    container_name: cache
+    restart: always
+    ports:
+      - '6379:6379' # Hanya untuk debugging lokal
+
+  # 3. Layanan Message Broker (RabbitMQ) [cite: 37]
+  broker:
+    image: rabbitmq:3-management-alpine
+    container_name: broker
+    restart: always
+    ports:
+      - '5672:5672'  # Port AMQP
+      - '15672:15672' # UI Manajemen RabbitMQ
+
+  # 4. Layanan Produk (NestJS) [cite: 35]
+  product-service:
+    container_name: product-service
+    # 'build:' menunjuk ke folder tempat Dockerfile NestJS berada
+    build:
+      context: ../challenge-product-service # <- PENTING: Menunjuk ke repo sebelah
+      dockerfile: Dockerfile
+    ports:
+      - '3000:3000' # Port NestJS
+    depends_on:
+      - db
+      - cache
+      - broker
+    environment:
+      # Kita akan gunakan ini nanti untuk menghubungkan NestJS ke layanan lain
+      DATABASE_URL: 'postgresql://admin:admin@db:5432/fullstack_challenge'
+      REDIS_HOST: 'cache'
+      REDIS_PORT: 6379
+      RABBITMQ_URL: 'amqp://guest:guest@broker:5672'
+
+  # 5. Layanan Order (Go) [cite: 36]
+  order-service:
+    container_name: order-service
+    # 'build:' menunjuk ke direktori saat ini (repo Go)
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - '8080:8080' # Port Go
+    depends_on:
+      - db
+      - cache
+      - broker
+    environment:
+      DATABASE_URL: 'postgresql://admin:admin@db:5432/fullstack_challenge'
+      REDIS_HOST: 'cache'
+      REDIS_PORT: 6379
+      RABBITMQ_URL: 'amqp://guest:guest@broker:5672'
+      PRODUCT_SERVICE_URL: 'http://product-service:3000' # Untuk memanggil API NestJS
+
+# Volume untuk menyimpan data Postgres
+volumes:
+  postgres_data:
