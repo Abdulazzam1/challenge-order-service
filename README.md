@@ -132,7 +132,7 @@ ok     challenge-order-service/internal/order/service  1.276s
 ### 4.3. Hasil Tes Kinerja & Kekurangan
 
   * **Target:** `1000 requests/seconds` untuk `POST /orders`.
-  * **Hasil:** Gagal. Layanan mengalami *bottleneck* parah di **\~120-130 req/s** dan sebagian besar *request* mengalami `timeout`.
+  * **Hasil:** Gagal. Layanan mengalami *bottleneck* parah di **\~120-130 req/s** dan dengan tingkat keberhasilan*request* menghindari `timeout` sebesar maksimal 97-98%.
   * **Diagnosis:** *Bottleneck* ini disebabkan oleh tiga operasi I/O sinkron (Tulis DB, Tulis RabbitMQ, Hapus Redis) yang terjadi pada setiap *request*. Untuk mencapai 1000 req/s, arsitektur `order-service` perlu diubah agar penulisan ke database (`repo.Save`) terjadi secara asinkron di *background worker*.
 
 <!-- end list -->
