@@ -24,22 +24,18 @@ var ctx = context.Background()
 func main() {
 	log.Println("Starting Order Service (Fase 4)...")
 
-	// === 1. PERBAIKAN KONEKSI DATABASE ===
-	// Ambil DATABASE_URL langsung dari environment (sesuai docker-compose.yml)
+	// === 1. KONEKSI DATABASE ===
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		log.Fatalf("DATABASE_URL environment variable is not set")
 	}
 
-	// Buka koneksi GORM menggunakan DSN
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 	log.Println("Database connection established.")
-	// ====================================
 
-	// AutoMigrate: Otomatis membuat tabel 'orders' berdasarkan struct Order
 	log.Println("Running AutoMigration...")
 	db.AutoMigrate(&order.Order{})
 
@@ -49,7 +45,7 @@ func main() {
 	redisAddr := fmt.Sprintf("%s:%s", redisHost, redisPort)
 
 	rdb := redis.NewClient(&redis.Options{
-		Addr: redisAddr, // Alamat dari docker-compose
+		Addr: redisAddr,
 	})
 
 	// Tes koneksi Redis
@@ -73,7 +69,7 @@ func main() {
 	defer ch.Close()
 	log.Println("RabbitMQ connection established.")
 
-	// Deklarasikan exchange yang akan kita gunakan untuk PUBLISH
+	// Deklarasikan exchange
 	err = ch.ExchangeDeclare(
 		"orders_exchange", // name
 		"topic",           // type
@@ -87,26 +83,32 @@ func main() {
 		log.Fatalf("Failed to declare 'orders_exchange': %v", err)
 	}
 
-	// 4. (BARU) Setup Listener 'order.created' (Sesuai Soal PDF)
-	// Ini akan berjalan sebagai goroutine untuk me-log event yang *diterbitkannya sendiri*
+	// 4. Setup Listener 'order.created'
 	go startOrderCreatedLogger(ch)
 
 	// 5. Setup Arsitektur (Repository -> Service -> Handler)
 	orderRepo := repository.NewOrderRepository(db)
-	orderService := service.NewOrderService(orderRepo, rdb, ch)
+
+	// FIX: Buat concrete implementation untuk 2 interface baru
+	productClient := service.NewProductClientImpl(rdb)
+	publisher := service.NewPublisherImpl(ch)
+
+	// FIX: Panggil dengan 4 argumen baru
+	// NewOrderService(repo, rdb, publisher, productClient)
+	orderService := service.NewOrderService(orderRepo, rdb, publisher, productClient)
+
 	orderHandler := handler.NewOrderHandler(orderService)
 
-	// 6. Setup Gin Router (Menggantikan net/http)
+	// 6. Setup Gin Router
 	router := gin.Default()
-	router.SetTrustedProxies(nil) // Keamanan
+	router.SetTrustedProxies(nil)
 
-	// Rute Health Check (Fitur stabil dari Fase 2)
+	// Rute Health Check
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
 
-	// Rute Fase 4 (Sesuai Soal PDF)
-	// Kita akan menggunakan /api/v1 untuk rute baru kita
+	// Rute Fase 4
 	api := router.Group("/api/v1")
 	{
 		api.POST("/orders", orderHandler.CreateOrder)
