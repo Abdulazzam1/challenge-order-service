@@ -1,33 +1,39 @@
-# Stage 1: Build
-FROM golang:1.20-alpine AS builder
+# ---- Build Stage ----
+# 1. PERBAIKAN: Gunakan versi Go yang cocok dengan go.mod
+FROM golang:1.24-alpine AS builder
 
+# Set up environment
 WORKDIR /app
+RUN apk add --no-cache git
 
-# Salin file modul
+# Salin file mod dan download dependensi
+# Ini memanfaatkan Docker cache layer
 COPY go.mod ./
-
-# Jalankan tidy. Ini akan membuat go.sum DI DALAM container
-# dan mengunduh dependensi jika ada.
+COPY go.sum ./
 RUN go mod tidy
+RUN go mod download
 
 # Salin sisa source code
 COPY . .
 
-# Build binary aplikasi
-# -o app = output file bernama 'app'
-# CGO_ENABLED=0 = build murni Go tanpa C libraries
-RUN CGO_ENABLED=0 GOOS=linux go build -o app ./...
+# Build binary
+# 2. PERBAIKAN: Path build menunjuk ke cmd/server/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o /app/order-service-binary ./cmd/server
 
-# Stage 2: Production
-FROM node:20-slim
+# ---- Production Stage ----
+# Gunakan image Alpine murni yang ringan
+FROM alpine:latest  
 
 WORKDIR /app
 
-# Salin binary 'app' dari stage builder
-COPY --from=builder /app/app .
+# Salin HANYA binary yang sudah di-build dari 'builder' stage
+COPY --from=builder /app/order-service-binary .
 
-# Expose port (meskipun sudah di-map di docker-compose, ini adalah praktik baik)
+# (Opsional) Salin file .env jika ada (meskipun docker-compose lebih baik)
+# COPY .env .
+
+# Port yang akan diekspos oleh Gin
 EXPOSE 8080
 
-# Jalankan aplikasi
-CMD ["./app"]
+# Perintah untuk menjalankan binary
+CMD ["./order-service-binary"]
