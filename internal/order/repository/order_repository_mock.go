@@ -45,6 +45,7 @@ func (m *MockOrderRepository) FindByProductID(productID uuid.UUID) ([]order.Orde
 // tetapi panggilan ke DB/Repo di Service sudah menggunakan FindByProductID.
 func (m *MockOrderRepository) GetOrdersByProductID(ctx context.Context, productID string) ([]order.Order, error) {
 	args := m.Called(ctx, productID)
+	// Pastikan return type array []order.Order
 	result := args.Get(0)
 	if result == nil {
 		return nil, args.Error(1)
