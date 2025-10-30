@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  # 1. Layanan Database (PostgreSQL) [cite: 39]
+  # 1. Layanan Database (PostgreSQL)
   db:
     image: postgres:14-alpine
     container_name: db
@@ -15,7 +15,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
-  # 2. Layanan Caching (Redis) [cite: 38]
+  # 2. Layanan Caching (Redis)
   cache:
     image: redis:7-alpine
     container_name: cache
@@ -23,7 +23,7 @@ services:
     ports:
       - '6379:6379' # Hanya untuk debugging lokal
 
-  # 3. Layanan Message Broker (RabbitMQ) [cite: 37]
+  # 3. Layanan Message Broker (RabbitMQ)
   broker:
     image: rabbitmq:3-management-alpine
     container_name: broker
@@ -31,28 +31,41 @@ services:
     ports:
       - '5672:5672'  # Port AMQP
       - '15672:15672' # UI Manajemen RabbitMQ
+    
+    # === PERBAIKAN 1: TAMBAHKAN HEALTHCHECK ===
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
 
-  # 4. Layanan Produk (NestJS) [cite: 35]
+  # 4. Layanan Produk (NestJS)
   product-service:
     container_name: product-service
     # 'build:' menunjuk ke folder tempat Dockerfile NestJS berada
     build:
-      context: ../challenge-product-service # <- PENTING: Menunjuk ke repo sebelah
+      context: ../challenge-product-service
       dockerfile: Dockerfile
     ports:
       - '3000:3000' # Port NestJS
+
+    # === PERBAIKAN 2: GUNAKAN CONDITIONAL DEPENDENCY ===
     depends_on:
-      - db
-      - cache
-      - broker
+      db:
+        condition: service_started
+      cache:
+        condition: service_started
+      broker:
+        condition: service_healthy # Menunggu broker siap sebelum memulai product-service
+
     environment:
-      # Kita akan gunakan ini nanti untuk menghubungkan NestJS ke layanan lain
       DATABASE_URL: 'postgresql://admin:admin@db:5432/fullstack_challenge'
       REDIS_HOST: 'cache'
       REDIS_PORT: 6379
       RABBITMQ_URL: 'amqp://guest:guest@broker:5672'
 
-  # 5. Layanan Order (Go) [cite: 36]
+  # 5. Layanan Order (Go)
   order-service:
     container_name: order-service
     # 'build:' menunjuk ke direktori saat ini (repo Go)
@@ -61,10 +74,16 @@ services:
       dockerfile: Dockerfile
     ports:
       - '8080:8080' # Port Go
+
+    # === PERBAIKAN 3: GUNAKAN CONDITIONAL DEPENDENCY (untuk konsistensi) ===
     depends_on:
-      - db
-      - cache
-      - broker
+      db:
+        condition: service_started
+      cache:
+        condition: service_started
+      broker:
+        condition: service_healthy # Menunggu broker siap sebelum memulai order-service
+
     environment:
       DATABASE_URL: 'postgresql://admin:admin@db:5432/fullstack_challenge'
       REDIS_HOST: 'cache'

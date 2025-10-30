@@ -1,48 +1,58 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
 	"os"
-    "context" // Tambahkan ini
-    "time"    // Tambahkan ini
+	"time"
 
-	amqp "github.com/rabbitmq/amqp091-go" // Import library baru
+	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-func main() {
-	// Daftarkan handler untuk route '/health'
-	http.HandleFunc("/health", healthCheckHandler)
+// Definisikan tipe "kontrak" kita (juga digunakan di NestJS)
+type OrderCreatedEvent struct {
+	OrderID         string `json:"orderId"`
+	ProductID       string `json:"productId"`
+	QuantityOrdered int    `json:"quantityOrdered"`
+	Timestamp       string `json:"timestamp"`
+}
 
-	// Daftarkan handler untuk route '/test-event' BARU
-	http.HandleFunc("/test-event", testEventHandler)
+func main() {
+	http.HandleFunc("/health", healthCheckHandler)
+	http.HandleFunc("/test-event", testEventHandler) // Endpoint ini sekarang lebih pintar
 
 	log.Println("Go (order-service) is running on :8080")
-	// Mulai server di port 8080
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		log.Fatalf("Could not start server: %s\n", err)
 	}
 }
 
-// handler untuk /health
 func healthCheckHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	response := map[string]string{"status": "ok"}
 	json.NewEncoder(w).Encode(response)
 }
 
-// HANDLER BARU: /test-event
+// --- PERUBAHAN DI SINI ---
 func testEventHandler(w http.ResponseWriter, r *http.Request) {
-	// 1. Dapatkan URL RabbitMQ dari environment variable
-	//    (Ini diset di docker-compose.yml)
+	// 1. Baca payload JSON dari body request (Postman)
+	var payload OrderCreatedEvent
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		log.Printf("Error decoding body: %s", err)
+		return
+	}
+	// Tambahkan data yang hilang (kita buat dummy saja)
+	payload.OrderID = "dummy-order-id"
+	payload.Timestamp = time.Now().Format(time.RFC3339)
+
+	// 2. Koneksi ke RabbitMQ (sama seperti sebelumnya)
 	rabbitMQURL := os.Getenv("RABBITMQ_URL")
 	if rabbitMQURL == "" {
-		// Fallback jika env var tidak ada
 		rabbitMQURL = "amqp://guest:guest@localhost:5672/"
 	}
-
-	// 2. Koneksi ke RabbitMQ
 	conn, err := amqp.Dial(rabbitMQURL)
 	if err != nil {
 		http.Error(w, "Failed to connect to RabbitMQ", http.StatusInternalServerError)
@@ -51,7 +61,6 @@ func testEventHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	// 3. Buat Channel
 	ch, err := conn.Channel()
 	if err != nil {
 		http.Error(w, "Failed to open a channel", http.StatusInternalServerError)
@@ -60,16 +69,9 @@ func testEventHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer ch.Close()
 
-	// 4. Deklarasikan Exchange (sesuai "kontrak" Fase 0)
-	//    Ini memastikan exchange-nya ada.
+	// 3. Deklarasikan Exchange (sama seperti sebelumnya)
 	err = ch.ExchangeDeclare(
-		"orders_exchange", // name (nama exchange)
-		"topic",           // type
-		true,              // durable (bertahan jika broker restart)
-		false,             // auto-deleted
-		false,             // internal
-		false,             // no-wait
-		nil,               // arguments
+		"orders_exchange", "topic", true, false, false, false, nil,
 	)
 	if err != nil {
 		http.Error(w, "Failed to declare an exchange", http.StatusInternalServerError)
@@ -77,20 +79,22 @@ func testEventHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 5. Siapkan pesan "halo" kita
-	body := `{"message": "hello from Go!"}`
-    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-    defer cancel()
+	// 4. Ubah pesan 'body' menjadi payload dari Postman
+	body, err := json.Marshal(payload)
+	if err != nil {
+		http.Error(w, "Failed to serialize payload", http.StatusInternalServerError)
+		log.Printf("Error serializing payload: %s", err)
+		return
+	}
 
-	// 6. Publish pesan
+	// 5. Publish pesan (sama seperti sebelumnya)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	err = ch.PublishWithContext(ctx,
-		"orders_exchange", // exchange
-		"order.created",   // routing key (sesuai "kontrak" Fase 0)
-		false,             // mandatory
-		false,             // immediate
+		"orders_exchange", "order.created", false, false,
 		amqp.Publishing{
 			ContentType: "application/json",
-			Body:        []byte(body),
+			Body:        body, // <-- Menggunakan body dari Postman
 		},
 	)
 	if err != nil {
@@ -99,9 +103,9 @@ func testEventHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 7. Beri respons sukses
+	// 6. Beri respons sukses
 	w.Header().Set("Content-Type", "application/json")
-	response := map[string]string{"status": "test event published!"}
+	response := map[string]string{"status": "real test event published!"}
 	json.NewEncoder(w).Encode(response)
-	log.Println("Test event published successfully!")
+	log.Printf("Real test event published successfully: %s", string(body))
 }

@@ -19,7 +19,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o app ./...
 
 # Stage 2: Production
-FROM alpine:latest
+FROM node:20-slim
 
 WORKDIR /app
 
