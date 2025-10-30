@@ -90,7 +90,7 @@ func main() {
 	orderRepo := repository.NewOrderRepository(db)
 
 	// FIX: Buat concrete implementation untuk 2 interface baru
-	productClient := service.NewProductClientImpl(rdb)
+	productClient := service.NewProductClientImpl()
 	publisher := service.NewPublisherImpl(ch)
 
 	// FIX: Panggil dengan 4 argumen baru

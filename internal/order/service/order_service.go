@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sync" // <-- Impor baru untuk cache yang aman
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -18,32 +19,25 @@ import (
 // Konteks global untuk Redis
 var ctx = context.Background()
 
-// --- INTERFACES BARU UNTUK MOCKING (Wajib) ---
-
-// Publisher mendefinisikan kontrak untuk pengiriman pesan (RabbitMQ/Kafka)
+// --- INTERFACES UNTUK MOCKING ---
 type Publisher interface {
 	Publish(exchange, routingKey string, body []byte) error
 }
 
-// ProductServiceClient mendefinisikan kontrak untuk mendapatkan info produk (Hybrid Cache Read)
 type ProductServiceClient interface {
-	// Menghilangkan context di sini agar sesuai dengan signature yang lebih sederhana
 	GetProductInfo(productID uuid.UUID) (*ProductResponse, error)
 }
 
 // --- CORE SERVICE DEFINITIONS ---
-
-// 1. Definisikan "Kontrak" (Interface) Service
 type OrderService interface {
 	CreateOrder(req order.CreateOrderRequest) (*order.Order, error)
 	GetOrdersByProductID(productID uuid.UUID) ([]order.Order, error)
 }
 
-// Struct internal untuk menampung data produk
 type ProductResponse struct {
 	ID    uuid.UUID `json:"id"`
 	Name  string    `json:"name"`
-	Price float64   `json:"price,string"` // Asumsi dari NestJS
+	Price float64   `json:"price,string"`
 	Qty   int       `json:"qty"`
 }
 
@@ -51,11 +45,11 @@ type ProductResponse struct {
 type orderService struct {
 	repo          repository.OrderRepository
 	rdb           *redis.Client
-	publisher     Publisher            // Menggunakan Interface
-	productClient ProductServiceClient // Menggunakan Interface
+	publisher     Publisher
+	productClient ProductServiceClient
 }
 
-// 3. Buat "Constructor" BARU (4 DEPENDENCY UNTUK MOCKING)
+// 3. Buat "Constructor"
 func NewOrderService(
 	repo repository.OrderRepository,
 	rdb *redis.Client,
@@ -70,12 +64,10 @@ func NewOrderService(
 	}
 }
 
-// --- Implementasi Logika Inti ---
-
 // 4. Implementasi "CreateOrder"
 func (s *orderService) CreateOrder(req order.CreateOrderRequest) (*order.Order, error) {
 
-	// TUGAS 1: Fetch info produk MENGGUNAKAN INTERFACE BARU (tanpa context)
+	// Panggil service client (yang sekarang punya cache-nya sendiri)
 	product, err := s.productClient.GetProductInfo(req.ProductID)
 	if err != nil {
 		return nil, err
@@ -94,20 +86,19 @@ func (s *orderService) CreateOrder(req order.CreateOrderRequest) (*order.Order, 
 		Status:     order.StatusPending,
 	}
 
-	// FIX: Hapus `context` dari panggilan Save (Menyelesaikan WrongArgCount Line 104)
+	// Simpan ke DB
 	savedOrder, err := s.repo.Save(newOrder)
 	if err != nil {
 		return nil, fmt.Errorf("gagal menyimpan order: %w", err)
 	}
 
-	// TUGAS 5: Publish event MENGGUNAKAN INTERFACE BARU
+	// Publish event
 	err = s.publisher.Publish("orders_exchange", "order.created", s.createEventBody(savedOrder, req.Quantity))
 	if err != nil {
 		log.Printf("PERINGATAN: Order %s berhasil disimpan, tapi GAGAL publish event: %v", savedOrder.ID, err)
-		// Tetap sukses karena event publishing bersifat async dan tidak memblokir order
 	}
 
-	// TUGAS 6: Hapus cache GetOrdersByProductID
+	// Hapus cache 'GetOrdersByProductID' (ini masih di Redis, tidak apa-apa)
 	cacheKey := fmt.Sprintf("orders_by_product:%s", req.ProductID.String())
 	s.rdb.Del(ctx, cacheKey)
 
@@ -128,7 +119,6 @@ func (s *orderService) GetOrdersByProductID(productID uuid.UUID) ([]order.Order,
 	}
 	log.Println("CACHE MISS untuk GetOrdersByProductID:", productID)
 
-	// FIX: Ganti GetOrdersByProductID menjadi FindByProductID (Menyelesaikan MissingFieldOrMethod Line 142)
 	orders, err := s.repo.FindByProductID(productID)
 	if err != nil {
 		return nil, err
@@ -143,6 +133,7 @@ func (s *orderService) GetOrdersByProductID(productID uuid.UUID) ([]order.Order,
 
 // createEventBody membuat payload event RabbitMQ
 func (s *orderService) createEventBody(order *order.Order, quantity int) []byte {
+	// ... (kode ini sama seperti sebelumnya, tidak perlu diubah)
 	event := struct {
 		OrderID         string `json:"orderId"`
 		ProductID       string `json:"productId"`
@@ -158,32 +149,39 @@ func (s *orderService) createEventBody(order *order.Order, quantity int) []byte 
 	return body
 }
 
-// ProductClientImpl mengimplementasikan ProductServiceClient (CONCRETE)
+// ===================================================================
+// === PERBAIKAN SOLUSI LAIN: BUAT CACHE IN-MEMORY DI SINI ===
+// ===================================================================
+
+// ProductClientImpl sekarang memiliki cache map-nya sendiri
 type ProductClientImpl struct {
-	rdb *redis.Client
+	productCache map[uuid.UUID]*ProductResponse // Cache in-memory kita
+	mu           sync.RWMutex                   // Mutex untuk melindungi map
 }
 
-func NewProductClientImpl(rdb *redis.Client) *ProductClientImpl {
-	return &ProductClientImpl{rdb: rdb}
+// NewProductClientImpl TIDAK LAGI MEMBUTUHKAN REDIS
+func NewProductClientImpl() *ProductClientImpl {
+	return &ProductClientImpl{
+		// Inisialisasi map
+		productCache: make(map[uuid.UUID]*ProductResponse),
+	}
 }
 
+// GetProductInfo sekarang menggunakan Go map, BUKAN Redis
 func (c *ProductClientImpl) GetProductInfo(productID uuid.UUID) (*ProductResponse, error) {
-	// Logika Hybrid Cache Read (Cache + HTTP Fallback)
-	productCacheKey := fmt.Sprintf("/products/%s", productID.String())
 
-	// 1. Coba Cache Read
-	val, err := c.rdb.Get(ctx, productCacheKey).Result()
-	if err == nil {
-		log.Println("CACHE HIT (Product Info):", productID)
-		var product ProductResponse
-		if json.Unmarshal([]byte(val), &product) == nil {
-			return &product, nil
-		}
+	// 1. Coba Cache Read (dari Go map)
+	c.mu.RLock() // Kunci untuk membaca
+	product, found := c.productCache[productID]
+	c.mu.RUnlock() // Buka kunci
+
+	if found {
+		log.Println("IN-MEMORY CACHE HIT (Product Info):", productID)
+		return product, nil
 	}
 
-	// 2. HTTP Fallback
-	log.Println("CACHE MISS (Product Info):", productID)
-	// Ganti URL ini jika environment Anda berbeda
+	// 2. HTTP Fallback (Cache Miss)
+	log.Println("IN-MEMORY CACHE MISS (Product Info):", productID)
 	productServiceURL := fmt.Sprintf("http://product-service:3000/products/%s", productID.String())
 
 	resp, err := http.Get(productServiceURL)
@@ -192,22 +190,27 @@ func (c *ProductClientImpl) GetProductInfo(productID uuid.UUID) (*ProductRespons
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("produk tidak ditemukan")
-	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("product-service mengembalikan error %d", resp.StatusCode)
 	}
 
-	var product ProductResponse
-	if err := json.NewDecoder(resp.Body).Decode(&product); err != nil {
+	var newProduct ProductResponse
+	if err := json.NewDecoder(resp.Body).Decode(&newProduct); err != nil {
 		return nil, fmt.Errorf("gagal decode respons product-service: %w", err)
 	}
 
-	return &product, nil
+	// 3. Tulis ke Cache (Go map)
+	c.mu.Lock() // Kunci untuk menulis
+	c.productCache[productID] = &newProduct
+	c.mu.Unlock() // Buka kunci
+
+	return &newProduct, nil
 }
 
+// ===================================================================
+
 // PublisherImpl mengimplementasikan Publisher (CONCRETE)
+// (Kode ini sama seperti sebelumnya, tidak perlu diubah)
 type PublisherImpl struct {
 	ch *amqp.Channel
 }
